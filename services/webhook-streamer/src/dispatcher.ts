@@ -279,7 +279,19 @@ export class WebhookDispatcher {
     const entry = this.deadLetters.get(deadLetterId);
     if (!entry) return undefined;
 
-    const result = await this._deliver(entry.subscription, entry.event);
+    const subscription = this.registry.get(entry.subscription.id);
+    if (!subscription) {
+      return {
+        subscriptionId: entry.subscription.id,
+        url: entry.subscription.url,
+        success: false,
+        failureKind: "subscription_gone",
+        error: "subscription no longer exists",
+        attemptedAt: Date.now(),
+      };
+    }
+
+    const result = await this._deliver(subscription, entry.event);
     if (result.success) {
       this.deadLetters.remove(deadLetterId);
     }

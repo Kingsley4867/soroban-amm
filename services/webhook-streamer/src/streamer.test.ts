@@ -710,6 +710,18 @@ describe("local webhook delivery integration", () => {
             assert.equal(dlq.size, 0);
         });
 
+        it("removes all dead letters for an unregistered subscription", () => {
+            const dlq = new DeadLetterQueue(5);
+            const removedSub = { id: "removed", url: "http://x", createdAt: 0 };
+            const retainedSub = { id: "retained", url: "http://y", createdAt: 0 };
+            dlq.add(EVENT, removedSub, [], "boom");
+            dlq.add(EVENT, retainedSub, [], "boom");
+
+            assert.equal(dlq.removeBySubscription(removedSub.id), 1);
+            assert.equal(dlq.size, 1);
+            assert.equal(dlq.list()[0].subscription.id, retainedSub.id);
+        });
+
         it("replays successfully once the endpoint recovers, and clears the entry", async () => {
             // Fail hard enough to dead-letter, then recover.
             let recovered = false;
@@ -760,6 +772,29 @@ describe("local webhook delivery integration", () => {
                     "original entry should survive a failed replay",
                 );
                 assert.equal(dlq.size, 2);
+            } finally {
+                await srv.close();
+            }
+        });
+
+        it("does not deliver a replay after its subscription is unregistered", async () => {
+            const srv = await startServer(() => ({ status: 500 }));
+            try {
+                const reg = new WebhookRegistry();
+                const sub = reg.register(srv.url);
+                const dlq = new DeadLetterQueue(10);
+                const d = makeDispatcher(reg, {
+                    maxRetries: 0,
+                    deadLetterQueue: dlq,
+                });
+                const [failed] = await d.dispatch(EVENT);
+                const hitsBeforeReplay = srv.hits();
+
+                assert.equal(reg.unregister(sub.id), true);
+                const replayed = await d.replay(failed.deadLetterId!);
+
+                assert.equal(replayed!.failureKind, "subscription_gone");
+                assert.equal(srv.hits(), hitsBeforeReplay);
             } finally {
                 await srv.close();
             }

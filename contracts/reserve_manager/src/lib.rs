@@ -940,9 +940,13 @@ impl ReserveManager {
 mod tests {
     use amm::AmmPool;
     use soroban_sdk::{
-        testutils::{storage::Instance as _, Address as _, Events as _, Ledger as _},
+        testutils::{
+            storage::Instance as _, Address as _, Events as _, Ledger as _, MockAuth,
+            MockAuthInvoke,
+        },
         token::StellarAssetClient,
-        Env, IntoVal, String,
+        xdr::{ScErrorCode, ScErrorType},
+        Env, IntoVal, String, Symbol, Val,
     };
     use token::{LpToken, LpTokenClient};
 
@@ -1008,6 +1012,183 @@ mod tests {
             tb,
             governance,
         }
+    }
+
+    fn assert_requires_auth<A: IntoVal<Env, soroban_sdk::Vec<Val>>>(
+        env: &Env,
+        contract_id: &Address,
+        signer_expected: &Address,
+        fn_name: &str,
+        args: A,
+    ) {
+        let args = args.into_val(env);
+        let invoke = MockAuthInvoke {
+            contract: contract_id,
+            fn_name,
+            args: &args,
+            sub_invokes: &[],
+        };
+        let auth_error =
+            soroban_sdk::Error::from_type_and_code(ScErrorType::Context, ScErrorCode::InvalidAction);
+
+        env.set_auths(&[]);
+        assert_eq!(
+            env.try_invoke_contract::<Val, soroban_sdk::Error>(
+                contract_id,
+                &Symbol::new(env, fn_name),
+                args.clone(),
+            ),
+            Err(Ok(auth_error)),
+            "{fn_name}: call without authorization must fail with Auth/InvalidAction"
+        );
+
+        let stranger = Address::generate(env);
+        env.mock_auths(&[MockAuth {
+            address: &stranger,
+            invoke: &invoke,
+        }]);
+        assert_eq!(
+            env.try_invoke_contract::<Val, soroban_sdk::Error>(
+                contract_id,
+                &Symbol::new(env, fn_name),
+                args.clone(),
+            ),
+            Err(Ok(auth_error)),
+            "{fn_name}: stranger authorization must fail with Auth/InvalidAction"
+        );
+
+        env.mock_auths(&[MockAuth {
+            address: signer_expected,
+            invoke: &invoke,
+        }]);
+        assert!(
+            env.try_invoke_contract::<Val, soroban_sdk::Error>(
+                contract_id,
+                &Symbol::new(env, fn_name),
+                args,
+            )
+            .is_ok(),
+            "{fn_name}: expected authorization from signer"
+        );
+    }
+
+    #[test]
+    fn propose_governance_requires_governance_auth() {
+        let s = setup();
+        let nominee = Address::generate(&s.env);
+        assert_requires_auth(
+            &s.env,
+            &s.rm_addr,
+            &s.governance,
+            "propose_governance",
+            (s.governance.clone(), nominee),
+        );
+
+        let stranger = Address::generate(&s.env);
+        s.env.mock_all_auths();
+        assert_eq!(
+            ReserveManagerClient::new(&s.env, &s.rm_addr)
+                .try_propose_governance(&stranger, &Address::generate(&s.env))
+                .unwrap_err()
+                .unwrap(),
+            ReserveManagerError::Unauthorized,
+            "propose_governance"
+        );
+    }
+
+    #[test]
+    fn propose_admin_requires_governance_auth() {
+        let s = setup();
+        let nominee = Address::generate(&s.env);
+        assert_requires_auth(
+            &s.env,
+            &s.rm_addr,
+            &s.governance,
+            "propose_admin",
+            (s.governance.clone(), nominee),
+        );
+
+        let stranger = Address::generate(&s.env);
+        s.env.mock_all_auths();
+        assert_eq!(
+            ReserveManagerClient::new(&s.env, &s.rm_addr)
+                .try_propose_admin(&stranger, &Address::generate(&s.env))
+                .unwrap_err()
+                .unwrap(),
+            ReserveManagerError::Unauthorized,
+            "propose_admin"
+        );
+    }
+
+    #[test]
+    fn accept_governance_requires_nominee_auth() {
+        let s = setup();
+        let nominee = Address::generate(&s.env);
+        ReserveManagerClient::new(&s.env, &s.rm_addr).propose_governance(&s.governance, &nominee);
+        assert_requires_auth(
+            &s.env,
+            &s.rm_addr,
+            &nominee,
+            "accept_governance",
+            (nominee,),
+        );
+    }
+
+    #[test]
+    fn accept_admin_requires_nominee_auth() {
+        let s = setup();
+        let nominee = Address::generate(&s.env);
+        ReserveManagerClient::new(&s.env, &s.rm_addr).propose_admin(&s.governance, &nominee);
+        assert_requires_auth(&s.env, &s.rm_addr, &nominee, "accept_admin", (nominee,));
+    }
+
+    #[test]
+    fn pause_requires_governance_auth() {
+        let s = setup();
+        assert_requires_auth(
+            &s.env,
+            &s.rm_addr,
+            &s.governance,
+            "pause",
+            soroban_sdk::Vec::<Val>::new(&s.env),
+        );
+    }
+
+    #[test]
+    fn unpause_requires_governance_auth() {
+        let s = setup();
+        ReserveManagerClient::new(&s.env, &s.rm_addr).pause();
+        assert_requires_auth(
+            &s.env,
+            &s.rm_addr,
+            &s.governance,
+            "unpause",
+            soroban_sdk::Vec::<Val>::new(&s.env),
+        );
+    }
+
+    #[test]
+    fn set_min_reserve_requires_governance_auth() {
+        let s = setup();
+        assert_requires_auth(
+            &s.env,
+            &s.rm_addr,
+            &s.governance,
+            "set_min_reserve",
+            (s.ta.clone(), s.tb.clone(), 500_000_i128, 300_000_i128),
+        );
+    }
+
+    #[test]
+    fn set_pool_kind_requires_governance_auth() {
+        let s = setup();
+        assert_requires_auth(
+            &s.env,
+            &s.rm_addr,
+            &s.governance,
+            "set_pool_kind",
+            (s.pool.clone(), PoolKind::Amm),
+        );
     }
 
     #[test]
